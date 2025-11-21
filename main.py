@@ -24,6 +24,8 @@ from typing import Iterable, List
 import requests
 from web3 import Web3
 
+from fetch_prices import fetch_prices, update_price_map
+
 
 RPC_URL = "https://lb.drpc.live/base/Avibgvi26EjPsw76UtdwmsS6VEL-8F4R75KJIhIl_7lF"
 SUGAR = "0x9DE6Eab7a910A288dE83a04b6A43B52Fd1246f1E"
@@ -144,6 +146,7 @@ class PoolRow:
     tfv: float  # total fees value in USD
     tbv: float  # total bribes value in USD
     tvv: float  # total rewards value in USD (fees + bribes)
+    votes_per_tvv: float  # ratio of votes to TVV (efficiency metric)
     rewards_epoch_ts: int
     emissions_raw: int  # emissions from LP sugar all()
 
@@ -402,6 +405,7 @@ def parse_pool(struct, votes_raw: int = 0, reward: dict | None = None, price_map
     tbv = sum(_usd_amount(item["token"], int(item["amount"]), price_map) for item in bribes)
     tvv = tfv + tbv
     ratio = (tvv / votes_raw) if votes_raw else math.nan
+    votes_per_tvv = (votes_raw / 1e18) / tvv if tvv > 0 else math.nan
     return PoolRow(
         address=lp,
         name=symbol,
@@ -424,6 +428,7 @@ def parse_pool(struct, votes_raw: int = 0, reward: dict | None = None, price_map
         tfv=tfv,
         tbv=tbv,
         tvv=tvv,
+        votes_per_tvv=votes_per_tvv,
         rewards_epoch_ts=int(reward.get("ts", 0)) if reward else 0,
         emissions_raw=emissions_raw,
     )
@@ -439,6 +444,29 @@ def iter_pools(batch_size: int = 187, price_map: dict | None = None) -> Iterable
         limit = min(batch_size, total - offset)
         print(f"Fetching pools {offset}..{offset+limit-1}")
         pools.extend(_normalize_pool(struct) for struct in fetch_chunk(limit, offset))
+
+    # Collect tokens and fetch missing prices
+    if price_map is not None:
+        all_tokens = set()
+        for p in pools:
+            if p.get("token0"): all_tokens.add(str(p["token0"]).lower())
+            if p.get("token1"): all_tokens.add(str(p["token1"]).lower())
+            if p.get("emissions_token"): all_tokens.add(str(p["emissions_token"]).lower())
+        
+        # We also need to check reward tokens, but we haven't fetched rewards yet.
+        # We can do a two-pass or just fetch for pool tokens first.
+        # Reward tokens (bribes/fees) might be different.
+        # But let's start with pool tokens.
+        
+        missing = {t for t in all_tokens if t not in price_map}
+        if missing:
+            print(f"Fetching prices for {len(missing)} missing tokens...")
+            try:
+                new_prices = fetch_prices(missing)
+                update_price_map(new_prices)
+                price_map.update(new_prices)
+            except Exception as e:
+                print(f"Failed to auto-fetch prices: {e}")
 
     print("Fetching voter weights in batches")
     weight_map = _fetch_weights([p["lp"] for p in pools], voter.address)
@@ -505,6 +533,7 @@ def write_csv(rows: Iterable[PoolRow], path: str = "pools.csv") -> None:
         "tfv",
         "tbv",
         "tvv",
+        "votes_per_tvv",
         "rewards_epoch_ts",
     ]
     rows = [r for r in rows]
@@ -553,6 +582,7 @@ def write_csv(rows: Iterable[PoolRow], path: str = "pools.csv") -> None:
                     "tfv": r.tfv,
                     "tbv": r.tbv,
                     "tvv": r.tvv,
+                    "votes_per_tvv": r.votes_per_tvv,
                     "rewards_epoch_ts": r.rewards_epoch_ts,
                 }
             )
@@ -582,6 +612,7 @@ def write_csv(rows: Iterable[PoolRow], path: str = "pools.csv") -> None:
                     "tfv": total_tfv,
                     "tbv": total_tbv,
                     "tvv": total_tvv,
+                    "votes_per_tvv": (total_votes / 1e18) / total_tvv if total_tvv > 0 else math.nan,
                 }
             )
     print(f"Wrote {len(rows)} pools to {path}")
