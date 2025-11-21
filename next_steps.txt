@@ -1,0 +1,13 @@
+Align fees/rewards with the Aerodrome UI
+---------------------------------------
+1) Query the rewards sugar contract (function `epochsByAddress(uint256 _epoch, uint256 _offset, address _pool)` on the Base rewardsSugar address) instead of relying on `token{0,1}_fees` from the LP sugar `all()` response.
+2) For the current voting epoch, for each pool/gauge:
+   - Call `epochsByAddress` with the current epoch id (as seen in the app) and fetch `fees` (array of {token, amount}) and `bribes` (array of {token, amount, fdv}).
+   - Sum fees to get the voter fee pot; sum bribes as external incentives.
+3) Convert each token amount to USD using a token price map (the app fetches tokens with prices; replicate that or hardcode a price feed). Then compute:
+   - `tfv`: total fees USD
+   - `tbv`: total bribes/incentives USD
+   - `tvv`: total rewards USD = tfv + tbv
+4) Write these into the CSV columns to mirror the UI. Keep `emissions` from sugar `all()` only as emissions; do not mix with tfv/tbv.
+5) Optional: cache token decimals/prices to avoid extra RPC calls. Use batch RPC for epochsByAddress if possible.
+6) Fix pricing for non-stable tokens — only USDC worked so far; other tokens still need prices wired up.
