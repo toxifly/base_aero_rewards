@@ -17,7 +17,9 @@ import csv
 import functools
 import json
 import math
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List
 
@@ -121,6 +123,20 @@ DEFAULT_PRICE_MAP = {
     "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": 1.0,
 }
 _UNPRICED_TOKENS: set[str] = set()
+
+
+def _timestamped_csv_path(prefix: str = "pools", suffix: str = ".csv") -> Path:
+    """
+    Build a timestamped CSV path (UTC) and avoid collisions by appending a counter.
+    """
+    ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+    base = Path(f"{prefix}_{ts}{suffix}")
+    path = base
+    counter = 1
+    while path.exists():
+        path = base.with_name(f"{base.stem}_{counter}{base.suffix}")
+        counter += 1
+    return path
 
 
 @dataclass
@@ -633,4 +649,16 @@ def write_csv(rows: Iterable[PoolRow], path: str = "pools.csv") -> None:
 
 if __name__ == "__main__":
     price_map = _load_price_map()
-    write_csv(iter_pools(price_map=price_map))
+    snapshot_path = _timestamped_csv_path()
+    write_csv(iter_pools(price_map=price_map), path=snapshot_path)
+
+    # Keep a rolling "latest" copy for downstream scripts while preserving dated snapshots.
+    shutil.copy(snapshot_path, "pools.csv")
+    print(f"Copied latest snapshot to pools.csv (source: {snapshot_path.name})")
+
+    try:
+        from generate_pools_html import generate_html
+
+        generate_html(source_csv=snapshot_path)
+    except Exception as exc:
+        print(f"Warning: failed to generate pools.html: {exc}")
