@@ -231,6 +231,47 @@ def _token_decimals(address: str) -> int:
         return 18
 
 
+# Well-known token symbols on Base to avoid RPC calls
+_SYMBOL_CACHE = {
+    "0x4200000000000000000000000000000000000006": "WETH",
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "USDC",
+    "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": "USDbC",
+    "0x940181a94a35a4569e4529a3cdfb74e38fd98631": "AERO",
+    "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": "DAI",
+    "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22": "cbETH",
+    "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452": "wstETH",
+    "0x4621b7a9c75199271f773ebd9a499dbd165c3191": "DOLA",
+    "0x236aa50979d5f3de3bd1eeb40e81137f22ab794b": "tBTC",
+    "0xb79dd08ea68a908a97220c76d19a6aa9cbde4376": "USD+",
+    "0x65a2508c429a6078a7bc2f7df81ab575bd9d9275": "DAI+",
+}
+
+
+@functools.lru_cache(maxsize=4096)
+def _token_symbol(address: str) -> str:
+    """
+    Resolve ERC20 symbol for a token address. Used to construct pool names
+    when the sugar contract returns an empty pool symbol.
+    """
+    if not address or str(address).lower() == ZERO_ADDR:
+        return "ETH"
+    addr_lower = str(address).lower()
+    if addr_lower in _SYMBOL_CACHE:
+        return _SYMBOL_CACHE[addr_lower]
+    try:
+        erc20 = _web3().eth.contract(
+            address=Web3.to_checksum_address(address),
+            abi=[{"name": "symbol", "inputs": [], "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"}],
+        )
+        sym = erc20.functions.symbol().call()
+        if sym and str(sym).strip() and str(sym).isprintable():
+            return str(sym).strip()
+    except Exception:
+        pass
+    # Fallback: abbreviated address
+    return f"{address[:6]}..{address[-4:]}"
+
+
 def _rpc_batch(payload: list) -> list:
     resp = requests.post(RPC_URL, json=payload, headers={"Content-Type": "application/json"})
     resp.raise_for_status()
@@ -399,11 +440,14 @@ def parse_pool(struct, votes_raw: int = 0, reward: dict | None = None, price_map
 
     lp = pool["lp"]
     symbol = pool["symbol"]
-    if not symbol or not str(symbol).strip() or not str(symbol).isprintable():
-        symbol = lp  # fallback when sugar returns empty symbol
-    decimals = int(pool["decimals"])
     token0 = pool["token0"]
     token1 = pool["token1"]
+    if not symbol or not str(symbol).strip() or not str(symbol).isprintable():
+        # Construct pool name from token symbols (for CL pools with no symbol)
+        t0_sym = _token_symbol(token0)
+        t1_sym = _token_symbol(token1)
+        symbol = f"CL-{t0_sym}/{t1_sym}"
+    decimals = int(pool["decimals"])
     gauge = pool["gauge"]
     emissions_token = pool["emissions_token"]
     token0_decimals = _token_decimals(token0)

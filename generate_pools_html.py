@@ -56,57 +56,71 @@ def generate_html(source_csv: Optional[str | Path] = None):
     <title>Aerodrome Pools Analysis</title>
     <style>
         :root {{
-            --bg: #0c1024;
-            --panel: #11162b;
-            --panel-alt: #161c33;
-            --accent: #5be3ff;
-            --accent-2: #8f9bff;
-            --text: #e8edf6;
-            --muted: #98a0b5;
-            --positive: #4ade80;
-            --negative: #f87171;
-            --border: #1f2941;
+            --bg: #0a0e1a;
+            --panel: #0f1525;
+            --panel-alt: #151b2e;
+            --panel-hover: #1a2236;
+            --accent: #00d4ff;
+            --accent-dim: rgba(0, 212, 255, 0.15);
+            --accent-2: #7c3aed;
+            --text: #f1f5f9;
+            --muted: #64748b;
+            --positive: #22c55e;
+            --negative: #ef4444;
+            --border: #1e293b;
+            --glow: rgba(0, 212, 255, 0.1);
         }}
-        * {{ box-sizing: border-box; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Inter', sans-serif;
-            background: radial-gradient(120% 120% at 20% 20%, rgba(91, 227, 255, 0.08), transparent),
-                        radial-gradient(100% 100% at 80% 0%, rgba(143, 155, 255, 0.08), transparent),
-                        var(--bg);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            background-image:
+                radial-gradient(ellipse 80% 50% at 50% -20%, var(--glow), transparent),
+                radial-gradient(ellipse 60% 40% at 100% 0%, rgba(124, 58, 237, 0.08), transparent);
             color: var(--text);
-            margin: 0;
-            padding: 32px 18px 64px;
-            line-height: 1.4;
+            min-height: 100vh;
+            padding: 24px 16px 48px;
+            line-height: 1.5;
         }}
         h1 {{
             text-align: center;
-            color: var(--accent);
-            margin-bottom: 12px;
-            letter-spacing: 0.5px;
+            font-size: 1.75rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+            letter-spacing: -0.02em;
         }}
         .subhead {{
             text-align: center;
             color: var(--muted);
-            margin-bottom: 28px;
-            font-size: 0.95rem;
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
         }}
         .layout {{
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
             display: flex;
             flex-direction: column;
-            gap: 18px;
+            gap: 16px;
         }}
         .card {{
             background: var(--panel);
             border: 1px solid var(--border);
-            border-radius: 14px;
-            box-shadow: 0 14px 40px rgba(0, 0, 0, 0.18);
-            padding: 18px 20px;
+            border-radius: 12px;
+            padding: 16px;
+            backdrop-filter: blur(8px);
         }}
         .stats-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 12px;
         }}
         .stat {{
@@ -114,66 +128,113 @@ def generate_html(source_csv: Optional[str | Path] = None):
             flex-direction: column;
             gap: 4px;
             background: var(--panel-alt);
-            padding: 12px 14px;
+            padding: 14px 16px;
             border-radius: 10px;
             border: 1px solid var(--border);
+            transition: border-color 0.2s, background 0.2s;
         }}
-        .stat-label {{ color: var(--muted); font-size: 0.85rem; }}
-        .stat-value {{ font-size: 1.25rem; font-weight: 600; color: var(--text); }}
+        .stat:hover {{
+            border-color: var(--accent);
+            background: var(--panel-hover);
+        }}
+        .stat-label {{ color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+        .stat-value {{ font-size: 1.125rem; font-weight: 600; color: var(--text); word-break: break-word; }}
+        .stat-value.positive {{ color: var(--positive); }}
+        .stat-value.negative {{ color: var(--negative); }}
         .chip {{
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 6px 10px;
-            background: rgba(91, 227, 255, 0.12);
+            gap: 4px;
+            padding: 4px 10px;
+            background: var(--accent-dim);
             color: var(--accent);
-            border-radius: 999px;
-            border: 1px solid rgba(91, 227, 255, 0.25);
-            font-size: 0.85rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            font-family: 'Roboto Mono', monospace;
         }}
         .controls {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
             gap: 12px;
         }}
         .control-group {{
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 4px;
         }}
-        label {{ color: var(--muted); font-size: 0.85rem; }}
+        label {{ color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }}
         input {{
             background: var(--panel-alt);
             border: 1px solid var(--border);
             color: var(--text);
-            padding: 9px 10px;
+            padding: 10px 12px;
             border-radius: 8px;
             outline: none;
+            font-size: 0.875rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }}
-        input:focus {{ border-color: var(--accent); }}
+        input:focus {{
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-dim);
+        }}
+        input::placeholder {{ color: var(--muted); }}
+        .table-wrapper {{
+            overflow-x: auto;
+            margin: 0 -16px;
+            padding: 0 16px;
+        }}
         .table-card table {{
             width: 100%;
+            min-width: 900px;
             border-collapse: collapse;
-            margin-top: 10px;
+            margin-top: 12px;
+            font-size: 0.875rem;
         }}
         th, td {{
-            padding: 11px 10px;
+            padding: 12px 10px;
             text-align: left;
             border-bottom: 1px solid var(--border);
+            white-space: nowrap;
         }}
         th {{
-            color: var(--accent);
+            color: var(--muted);
+            font-weight: 500;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
             cursor: pointer;
             user-select: none;
             position: sticky;
             top: 0;
             background: var(--panel);
+            z-index: 10;
+            transition: color 0.2s;
         }}
-        th:hover {{ background: var(--panel-alt); }}
-        tr:hover td {{ background: rgba(255, 255, 255, 0.03); }}
-        .metric-value {{ font-family: 'Roboto Mono', monospace; }}
-        .positive {{ color: var(--positive); }}
-        .negative {{ color: var(--negative); }}
+        th:hover {{ color: var(--accent); }}
+        th.sorted {{ color: var(--accent); }}
+        th .sort-icon {{ opacity: 0.5; margin-left: 4px; }}
+        th.sorted .sort-icon {{ opacity: 1; }}
+        tbody tr {{
+            transition: background 0.15s;
+        }}
+        tbody tr:hover {{ background: var(--panel-alt); }}
+        tbody tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.01); }}
+        tbody tr:nth-child(even):hover {{ background: var(--panel-alt); }}
+        td.name-cell {{
+            font-weight: 500;
+            color: var(--text);
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .metric-value {{
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }}
+        .positive {{ color: var(--positive) !important; }}
+        .negative {{ color: var(--negative) !important; }}
         .muted {{ color: var(--muted); }}
         .card-header {{
             display: flex;
@@ -181,13 +242,24 @@ def generate_html(source_csv: Optional[str | Path] = None):
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
-            margin-bottom: 6px;
+            margin-bottom: 4px;
         }}
-        .card-title {{ margin: 0; font-size: 1.05rem; }}
-        .small {{ font-size: 0.9rem; color: var(--muted); margin: 4px 0 0; }}
-        .empty {{ color: var(--muted); text-align: center; padding: 12px 0; }}
+        .card-title {{ font-size: 0.95rem; font-weight: 600; }}
+        .small {{ font-size: 0.8rem; color: var(--muted); margin-top: 2px; }}
+        .empty {{ color: var(--muted); text-align: center; padding: 24px 0; }}
+        .row-count {{
+            font-size: 0.75rem;
+            color: var(--muted);
+            padding: 8px 0;
+        }}
+        @media (max-width: 768px) {{
+            body {{ padding: 16px 12px 32px; }}
+            h1 {{ font-size: 1.5rem; }}
+            .stats-grid {{ grid-template-columns: repeat(2, 1fr); }}
+            .controls {{ grid-template-columns: repeat(2, 1fr); }}
+        }}
     </style>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Roboto+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="layout">
@@ -202,7 +274,11 @@ def generate_html(source_csv: Optional[str | Path] = None):
                 <div class="stat-value" id="totalPools">-</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Median Votes/TVV</div>
+                <div class="stat-label">Avg V/TVV</div>
+                <div class="stat-value" id="avgVotesPerTVV">-</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Median V/TVV</div>
                 <div class="stat-value" id="medianVotesPerTVV">-</div>
             </div>
             <div class="stat">
@@ -250,25 +326,30 @@ def generate_html(source_csv: Optional[str | Path] = None):
             <div class="card-header">
                 <div>
                     <p class="card-title">Pools + Vote Changes</p>
-                    <p class="small">Single view with efficiency metrics and vote deltas between snapshots.</p>
+                    <p class="small">Efficiency metrics and vote deltas between snapshots. Click headers to sort.</p>
                 </div>
-                <div class="chip" id="comparisonChip">Prev: {comparison_meta.get("previous") or "n/a"}</div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <span class="row-count" id="rowCount"></span>
+                    <div class="chip" id="comparisonChip">Prev: {comparison_meta.get("previous") or "n/a"}</div>
+                </div>
             </div>
-            <table id="poolsTable">
-                <thead>
-                    <tr>
-                        <th onclick="sortTable('name')">Name</th>
-                        <th onclick="sortTable('vote_pct')">Vote %</th>
-                        <th onclick="sortTable('votes')">Votes</th>
-                        <th onclick="sortTable('previous_votes')">Prev Votes</th>
-                        <th onclick="sortTable('delta_votes')">Δ Votes</th>
-                        <th onclick="sortTable('delta_pct')">Δ %</th>
-                        <th onclick="sortTable('tvv')">TVV ($)</th>
-                        <th onclick="sortTable('votes_per_tvv')">Votes / TVV</th>
-                    </tr>
-                </thead>
-                <tbody id="tableBody"></tbody>
-            </table>
+            <div class="table-wrapper">
+                <table id="poolsTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable('name')" data-key="name">Pool<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('vote_pct')" data-key="vote_pct">Vote %<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('votes')" data-key="votes">Votes<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('previous_votes')" data-key="previous_votes">Prev<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('delta_votes')" data-key="delta_votes">Δ Votes<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('delta_pct')" data-key="delta_pct">Δ %<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('tvv')" data-key="tvv">TVV<span class="sort-icon"></span></th>
+                            <th onclick="sortTable('votes_per_tvv')" data-key="votes_per_tvv">V/TVV<span class="sort-icon"></span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -295,20 +376,34 @@ def generate_html(source_csv: Optional[str | Path] = None):
 
         let currentSort = {{ key: 'vote_pct', dir: 'desc' }};
 
-        const validPools = TABLE_ROWS
-            .filter(p => p.votes_per_tvv !== null && p.votes_per_tvv !== undefined && !isNaN(p.votes_per_tvv));
-        const sortedVPT = [...validPools].sort((a, b) => a.votes_per_tvv - b.votes_per_tvv);
+        // Helper to check for valid finite numbers (handles Python nan/inf as strings)
+        function isValidNumber(val) {{
+            if (val === null || val === undefined) return false;
+            if (typeof val === 'string') {{
+                const lower = val.toLowerCase();
+                if (lower === 'nan' || lower === 'inf' || lower === '-inf' || lower === 'infinity' || lower === '-infinity') return false;
+            }}
+            const num = Number(val);
+            return !isNaN(num) && isFinite(num) && num > 0;
+        }}
+
+        const validPools = TABLE_ROWS.filter(p => isValidNumber(p.votes_per_tvv));
+        const sortedVPT = [...validPools].sort((a, b) => Number(a.votes_per_tvv) - Number(b.votes_per_tvv));
 
         let globalMedianVotesPerTVV = 0;
+        let globalAvgVotesPerTVV = 0;
         if (sortedVPT.length > 0) {{
             const mid = Math.floor(sortedVPT.length / 2);
             globalMedianVotesPerTVV = sortedVPT.length % 2 !== 0
-                ? sortedVPT[mid].votes_per_tvv
-                : (sortedVPT[mid - 1].votes_per_tvv + sortedVPT[mid]) / 2;
+                ? Number(sortedVPT[mid].votes_per_tvv)
+                : (Number(sortedVPT[mid - 1].votes_per_tvv) + Number(sortedVPT[mid].votes_per_tvv)) / 2;
+            const sum = sortedVPT.reduce((acc, p) => acc + Number(p.votes_per_tvv), 0);
+            globalAvgVotesPerTVV = sum / sortedVPT.length;
         }}
 
         document.getElementById('totalPools').innerText = TABLE_ROWS.length;
-        document.getElementById('medianVotesPerTVV').innerText = formatNumber(globalMedianVotesPerTVV);
+        document.getElementById('avgVotesPerTVV').innerText = formatNumber(globalAvgVotesPerTVV, 1);
+        document.getElementById('medianVotesPerTVV').innerText = formatNumber(globalMedianVotesPerTVV, 1);
         document.getElementById('snapshotLabel').innerText = COMPARISON_META.current || 'n/a';
         document.getElementById('comparisonLabel').innerText = COMPARISON_META.previous || 'n/a';
 
@@ -356,11 +451,14 @@ def generate_html(source_csv: Optional[str | Path] = None):
 
             filteredData.forEach(pool => {{
                 const tr = document.createElement('tr');
+                const vpt = isValidNumber(pool.votes_per_tvv) ? Number(pool.votes_per_tvv) : null;
                 let vptClass = 'muted';
-                if (pool.votes_per_tvv > globalMedianVotesPerTVV * 1.25) {{
-                    vptClass = 'negative';
-                }} else if (pool.votes_per_tvv < globalMedianVotesPerTVV * 0.75 && pool.votes_per_tvv > 0) {{
-                    vptClass = 'positive';
+                if (vpt !== null && globalMedianVotesPerTVV > 0) {{
+                    if (vpt > globalMedianVotesPerTVV * 1.25) {{
+                        vptClass = 'negative';
+                    }} else if (vpt < globalMedianVotesPerTVV * 0.75) {{
+                        vptClass = 'positive';
+                    }}
                 }}
 
                 const deltaVotes = pool.delta_votes;
@@ -371,17 +469,32 @@ def generate_html(source_csv: Optional[str | Path] = None):
                     : `${{deltaPct > 0 ? '+' : ''}}${{Number(deltaPct).toFixed(2)}}%`;
 
                 tr.innerHTML = `
-                    <td>${{pool.name}}</td>
+                    <td class="name-cell" title="${{pool.name}}">${{pool.name}}</td>
                     <td class="metric-value">${{formatNumber(pool.vote_pct, 4)}}%</td>
                     <td class="metric-value">${{formatNumber(pool.votes, 0)}}</td>
                     <td class="metric-value">${{formatNumber(pool.previous_votes, 0)}}</td>
-                    <td class="metric-value ${{deltaClass}}">${{formatNumber(deltaVotes, 2)}}</td>
+                    <td class="metric-value ${{deltaClass}}">${{formatNumber(deltaVotes, 0)}}</td>
                     <td class="metric-value ${{deltaClass}}">${{deltaPctDisplay}}</td>
-                    <td class="metric-value">$${{formatNumber(pool.tvv)}}</td>
-                    <td class="metric-value ${{vptClass}}">${{formatNumber(pool.votes_per_tvv)}}</td>
+                    <td class="metric-value">$${{formatNumber(pool.tvv, 0)}}</td>
+                    <td class="metric-value ${{vptClass}}">${{vpt !== null ? formatNumber(vpt, 1) : '-'}}</td>
                 `;
                 tbody.appendChild(tr);
             }});
+
+            // Update row count
+            document.getElementById('rowCount').innerText = `${{filteredData.length}} pools`;
+
+            // Update sort indicators
+            document.querySelectorAll('th[data-key]').forEach(th => {{
+                th.classList.remove('sorted');
+                const icon = th.querySelector('.sort-icon');
+                icon.textContent = '';
+            }});
+            const sortedTh = document.querySelector(`th[data-key="${{currentSort.key}}"]`);
+            if (sortedTh) {{
+                sortedTh.classList.add('sorted');
+                sortedTh.querySelector('.sort-icon').textContent = currentSort.dir === 'desc' ? ' ↓' : ' ↑';
+            }}
         }}
 
         function sortTable(key) {{
