@@ -65,12 +65,18 @@ def _load_votes(csv_path: Path) -> Dict[str, dict]:
     return votes
 
 
+DATA_DIR = Path("data")
+
+
 def find_latest_csvs(limit: int = 2) -> List[Path]:
     """
     Return up to `limit` CSV files sorted by modified time (newest first).
-    Prefers timestamped snapshots (pools_*.csv) but falls back to pools.csv.
+    Prefers timestamped snapshots in data/ folder but falls back to pools.csv.
     """
-    candidates = sorted(Path(".").glob("pools_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    DATA_DIR.mkdir(exist_ok=True)
+    candidates = sorted(DATA_DIR.glob("pools_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Also check root for legacy files
+    candidates.extend(sorted(Path(".").glob("pools_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True))
     latest_plain = Path("pools.csv")
     if latest_plain.exists():
         candidates.append(latest_plain)

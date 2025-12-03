@@ -125,12 +125,16 @@ DEFAULT_PRICE_MAP = {
 _UNPRICED_TOKENS: set[str] = set()
 
 
+DATA_DIR = Path("data")
+
+
 def _timestamped_csv_path(prefix: str = "pools", suffix: str = ".csv") -> Path:
     """
-    Build a timestamped CSV path (UTC) and avoid collisions by appending a counter.
+    Build a timestamped CSV path (UTC) in the data/ folder and avoid collisions by appending a counter.
     """
+    DATA_DIR.mkdir(exist_ok=True)
     ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-    base = Path(f"{prefix}_{ts}{suffix}")
+    base = DATA_DIR / f"{prefix}_{ts}{suffix}"
     path = base
     counter = 1
     while path.exists():
