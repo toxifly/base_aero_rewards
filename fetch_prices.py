@@ -1,4 +1,5 @@
 
+import concurrent.futures
 import csv
 import json
 import requests
@@ -16,46 +17,67 @@ def get_tokens_from_csv():
     if not Path(POOLS_CSV).exists():
         print(f"{POOLS_CSV} not found.")
         return tokens
-    
+
     with open(POOLS_CSV, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if row.get("token0"): tokens.add(row["token0"].lower())
             if row.get("token1"): tokens.add(row["token1"].lower())
             if row.get("emissions_token"): tokens.add(row["emissions_token"].lower())
-            # Also check for reward tokens if we had them in CSV, but we don't yet fully.
-            # We can add known ones.
     return tokens
 
-def fetch_prices(tokens):
-    if not tokens:
-        return {}
-    
-    # Chunk tokens to avoid URL length limits
-    chunk_size = 30 # DefiLlama might handle more, but safe side
-    tokens_list = list(tokens)
+
+def _fetch_chunk(chunk, idx, total):
+    """Fetch prices for a single chunk from DefiLlama."""
+    query = ",".join([f"base:{t}" for t in chunk])
+    url = f"{API_URL}{query}"
     prices = {}
-    
-    for i in range(0, len(tokens_list), chunk_size):
-        chunk = tokens_list[i:i+chunk_size]
-        query = ",".join([f"base:{t}" for t in chunk])
-        url = f"{API_URL}{query}"
-        
+    for attempt in range(3):
         try:
-            print(f"Fetching chunk {i}...")
-            resp = requests.get(url)
+            resp = requests.get(url, timeout=(5, 15))
             resp.raise_for_status()
             data = resp.json()
             coins = data.get("coins", {})
             for key, info in coins.items():
-                # key is like "base:0x..."
                 addr = key.split(":")[1].lower()
                 prices[addr] = info.get("price", 0)
+            return prices
         except Exception as e:
-            print(f"Error fetching chunk {i}: {e}")
-        
-        time.sleep(0.5) # Rate limit nice
-        
+            if attempt == 2:
+                print(f"Error fetching price chunk {idx}: {e}")
+            else:
+                time.sleep(1)
+    return prices
+
+
+def fetch_prices(tokens):
+    if not tokens:
+        return {}
+
+    chunk_size = 80  # DefiLlama handles large batches well
+    tokens_list = list(tokens)
+    chunks = []
+    for i in range(0, len(tokens_list), chunk_size):
+        chunks.append(tokens_list[i:i + chunk_size])
+
+    total = len(chunks)
+    print(f"Fetching prices: {len(tokens_list)} tokens in {total} chunks (4 concurrent workers)")
+    prices = {}
+    done = [0]
+
+    def worker(args):
+        idx, chunk = args
+        result = _fetch_chunk(chunk, idx, total)
+        done[0] += 1
+        if done[0] % 20 == 0 or done[0] == total:
+            print(f"  Prices: {done[0]}/{total} chunks", flush=True)
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        results = executor.map(worker, enumerate(chunks))
+        for result in results:
+            prices.update(result)
+
     return prices
 
 def update_price_map(new_prices):

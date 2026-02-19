@@ -13,14 +13,19 @@ Notes
 
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import functools
 import json
 import math
+import os
+import queue
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Iterable, List
 
 import requests
@@ -29,13 +34,24 @@ from web3 import Web3
 from fetch_prices import fetch_prices, update_price_map
 
 
-RPC_URL = "https://lb.drpc.live/base/Avibgvi26EjPsw76UtdwmsS6VEL-8F4R75KJIhIl_7lF"
+_PUBLIC_RPCS = [
+    "https://mainnet.base.org",
+    "https://developer-access-mainnet.base.org",
+    "https://1rpc.io/base",
+    "https://base-rpc.publicnode.com",
+    "https://base-mainnet.public.blastapi.io",
+    "https://base-public.nodies.app",
+    "https://base.rpc.blxrbdn.com",
+]
+# Extra RPC URLs from env (comma-separated), e.g. private/keyed endpoints
+_extra = [url.strip() for url in os.environ.get("EXTRA_RPC_URLS", "").split(",") if url.strip()]
+RPC_URLS = _extra + _PUBLIC_RPCS
+_rpc_index = 0
+_print_lock = Lock()
 SUGAR = "0x9DE6Eab7a910A288dE83a04b6A43B52Fd1246f1E"
 REWARDS_SUGAR = "0xD4aD2EeeB3314d54212A92f4cBBE684195dEfe3E"
 ABI_PATH = Path("sugar_abi.abi")
-_WEB3 = None
-_SUGAR_CONTRACT = None
-_REWARDS_CONTRACT = None
+_WEB3_CACHE: dict = {}  # keyed by RPC URL
 _VOTER_CONTRACT = None
 STRUCT_KEYS = [
     "lp",
@@ -171,16 +187,84 @@ class PoolRow:
     emissions_raw: int  # emissions from LP sugar all()
 
 
-def _web3() -> Web3:
+def _safe_print(*args, **kwargs):
+    """Thread-safe print with flush."""
+    with _print_lock:
+        print(*args, **kwargs, flush=True)
+
+
+def _rpc_label(url: str) -> str:
+    """Short label for an RPC URL for log messages."""
+    return url.split("//")[1][:35]
+
+
+def _next_rpc() -> str:
+    """Round-robin through available RPC endpoints."""
+    global _rpc_index
+    url = RPC_URLS[_rpc_index % len(RPC_URLS)]
+    _rpc_index += 1
+    return url
+
+
+def _current_rpc() -> str:
+    """Return the current RPC URL without advancing."""
+    return RPC_URLS[_rpc_index % len(RPC_URLS)]
+
+
+_RETRYABLE_PATTERNS = (
+    "429", "too many requests", "500", "502", "503", "504",
+    "bad gateway", "server error", "connection", "timeout",
+    "10 calls", "quota", "rate", "limit", "throttl",
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in _RETRYABLE_PATTERNS)
+
+
+def _retry(fn, *args, max_retries: int = 6, rotate_rpc: bool = True, **kwargs):
+    """Call *fn* with retries, exponential backoff, and RPC rotation on transient errors."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt == max_retries - 1:
+                raise
+            if rotate_rpc:
+                _next_rpc()
+            wait = min(2 ** attempt, 8)
+            short_err = str(exc)[:120]
+            _safe_print(f"  Retryable error: {short_err} -- rotating RPC, retry in {wait}s ({attempt + 1}/{max_retries})")
+            time.sleep(wait)
+
+
+def _retry_rpc(fn, rpc_url: str, max_retries: int = 10):
+    """Call fn(rpc_url) with retries and backoff for a *specific* RPC (used by concurrent workers)."""
+    label = _rpc_label(rpc_url)
+    for attempt in range(max_retries):
+        try:
+            return fn(rpc_url)
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt == max_retries - 1:
+                raise
+            wait = min(2 ** attempt, 30)
+            short_err = str(exc)[:100]
+            _safe_print(f"  [{label}] retry {attempt + 1}/{max_retries}: {short_err} (wait {wait}s)")
+            time.sleep(wait)
+
+
+def _web3(rpc_url: str | None = None) -> Web3:
     """
-    Shared Web3 provider to avoid reconnecting for each contract call.
+    Get a Web3 instance for the given (or current) RPC URL.  Caches per-URL.
     """
-    global _WEB3
-    if _WEB3 is None:
-        _WEB3 = Web3(Web3.HTTPProvider(RPC_URL))
-        if not _WEB3.is_connected():
-            raise RuntimeError("Unable to connect to RPC endpoint")
-    return _WEB3
+    url = rpc_url or _current_rpc()
+    if url not in _WEB3_CACHE:
+        w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": (5, 30)}))
+        if not w3.is_connected():
+            raise RuntimeError(f"Unable to connect to RPC endpoint {url}")
+        _WEB3_CACHE[url] = w3
+    return _WEB3_CACHE[url]
 
 
 def _normalize_pool(struct) -> dict:
@@ -277,20 +361,43 @@ def _token_symbol(address: str) -> str:
 
 
 def _rpc_batch(payload: list) -> list:
-    resp = requests.post(RPC_URL, json=payload, headers={"Content-Type": "application/json"})
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and "error" in data:
-        raise RuntimeError(data["error"])
-    return data
+    """Send batch JSON-RPC using the current (round-robin) RPC."""
+    def _do():
+        url = _current_rpc()
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=(5, 30))
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(data["error"])
+        return data
+    return _retry(_do)
 
 
-def _fetch_weights(addresses: List[str], voter_address: str, chunk_size: int = 120) -> dict:
+def _rpc_batch_to(payload: list, rpc_url: str) -> list:
+    """Send batch JSON-RPC to a *specific* RPC URL (used by concurrent workers)."""
+    def _do(url):
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=(5, 30))
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(data["error"])
+        return data
+    return _retry_rpc(_do, rpc_url)
+
+
+def _fetch_weights(addresses: List[str], voter_address: str, chunk_size: int = 10) -> dict:
     """
-    Batch-fetch weights from the voter contract to avoid serial RPC calls.
+    Concurrently batch-fetch weights using a shared work queue.
+    All RPCs pull from the same queue; if one is slow/failing others pick up the slack.
     """
-    weights = {}
+    if not addresses:
+        return {}
+
     voter = _voter()
+
+    # Pre-encode all chunks in main thread
+    work_queue: queue.Queue = queue.Queue()
+    total_chunks = 0
     for start in range(0, len(addresses), chunk_size):
         batch = addresses[start : start + chunk_size]
         id_map = {}
@@ -302,42 +409,70 @@ def _fetch_weights(addresses: List[str], voter_address: str, chunk_size: int = 1
             payload.append(
                 {"jsonrpc": "2.0", "id": call_id, "method": "eth_call", "params": [{"to": voter_address, "data": data}, "latest"]}
             )
-        responses = _rpc_batch(payload)
-        for item in responses:
-            if "result" not in item:
+        work_queue.put((payload, id_map, 0))  # 0 = retry count
+        total_chunks += 1
+
+    _safe_print(f"  {total_chunks} weight chunks, {len(RPC_URLS)} concurrent workers")
+
+    weights = {}
+    weights_lock = Lock()
+    done = [0]
+    max_requeues = len(RPC_URLS) * 2  # max times a chunk bounces between workers
+
+    def worker(rpc_url: str) -> None:
+        label = _rpc_label(rpc_url)
+        while True:
+            try:
+                payload, id_map, retries = work_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                responses = _rpc_batch_to(payload, rpc_url)
+            except Exception as exc:
+                if retries < max_requeues:
+                    work_queue.put((payload, id_map, retries + 1))
+                else:
+                    _safe_print(f"  [{label}] giving up on chunk after {retries} requeues: {str(exc)[:80]}")
+                    with weights_lock:
+                        done[0] += 1
                 continue
-            addr = id_map[item["id"]]
-            weights[addr] = _decode_int256(item["result"])
+            local = {}
+            for item in responses:
+                if "result" not in item:
+                    continue
+                addr = id_map[item["id"]]
+                local[addr] = _decode_int256(item["result"])
+            with weights_lock:
+                weights.update(local)
+                done[0] += 1
+                if done[0] % 100 == 0 or done[0] == total_chunks:
+                    _safe_print(f"  Weights: {done[0]}/{total_chunks} chunks")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RPC_URLS)) as executor:
+        futures = [executor.submit(worker, url) for url in RPC_URLS]
+        concurrent.futures.wait(futures)
+
     return weights
+
+
+@functools.lru_cache(maxsize=1)
+def _sugar_abi():
+    with open(ABI_PATH, "r") as f:
+        return json.load(f)
 
 
 def _contract():
     """
-    Lazy-load the sugar contract so Web3 handles ABI decoding for us.
+    Build the sugar contract against the *current* RPC provider.
     """
-    global _SUGAR_CONTRACT
-    if _SUGAR_CONTRACT is not None:
-        return _SUGAR_CONTRACT
-
-    with open(ABI_PATH, "r") as f:
-        abi = json.load(f)
-
-    web3 = _web3()
-
-    _SUGAR_CONTRACT = web3.eth.contract(address=Web3.to_checksum_address(SUGAR), abi=abi)
-    return _SUGAR_CONTRACT
+    return _web3().eth.contract(address=Web3.to_checksum_address(SUGAR), abi=_sugar_abi())
 
 
 def _rewards_contract():
     """
     Minimal rewards sugar contract used for epochsByAddress.
     """
-    global _REWARDS_CONTRACT
-    if _REWARDS_CONTRACT is not None:
-        return _REWARDS_CONTRACT
-
-    _REWARDS_CONTRACT = _web3().eth.contract(address=Web3.to_checksum_address(REWARDS_SUGAR), abi=REWARDS_ABI)
-    return _REWARDS_CONTRACT
+    return _web3().eth.contract(address=Web3.to_checksum_address(REWARDS_SUGAR), abi=REWARDS_ABI)
 
 
 def _voter():
@@ -345,21 +480,19 @@ def _voter():
     Minimal voter contract used solely to read gauge weights (votes).
     """
     global _VOTER_CONTRACT
-    if _VOTER_CONTRACT is not None:
-        return _VOTER_CONTRACT
-
-    voter_addr = _contract().functions.voter().call()
-    _VOTER_CONTRACT = _web3().eth.contract(address=Web3.to_checksum_address(voter_addr), abi=VOTER_ABI)
-    return _VOTER_CONTRACT
+    if _VOTER_CONTRACT is None:
+        voter_addr = _retry(lambda: _contract().functions.voter().call())
+        _VOTER_CONTRACT = {"address": Web3.to_checksum_address(voter_addr)}
+    return _web3().eth.contract(address=_VOTER_CONTRACT["address"], abi=VOTER_ABI)
 
 
 def get_pool_count() -> int:
-    return _contract().functions.count().call()
+    return _retry(lambda: _contract().functions.count().call())
 
 
 def fetch_chunk(limit: int, offset: int) -> List[dict]:
-    # filter = 0 => no filter on pools
-    return _contract().functions.all(limit, offset, 0).call()
+    _next_rpc()  # rotate RPC for each chunk
+    return _retry(lambda: _contract().functions.all(limit, offset, 0).call())
 
 
 def _load_price_map(path: Path = PRICE_MAP_PATH) -> dict:
@@ -399,17 +532,23 @@ def _normalize_reward_entry(entry) -> dict:
     return data
 
 
-def _fetch_rewards_map(addresses: List[str], limit: int = 1, offset: int = 0, chunk_size: int = 100) -> dict:
+def _fetch_rewards_map(addresses: List[str], limit: int = 1, offset: int = 0, chunk_size: int = 10) -> dict:
     """
-    Batch-fetch rewards (fees + bribes) for each pool.
+    Concurrently batch-fetch rewards using a shared work queue.
+    All RPCs pull from the same queue; if one is slow/failing others pick up the slack.
     """
     rewards = {}
     if not addresses:
         return rewards
 
+    # Pre-encode all call data in the main thread
     contract = _rewards_contract()
     fn = contract.get_function_by_name("epochsByAddress")
     output_types = [_abi_type(o) for o in fn.abi["outputs"]]
+    codec = _web3().codec  # shared ABI decoder (stateless, thread-safe)
+
+    work_queue: queue.Queue = queue.Queue()
+    total_chunks = 0
     for start in range(0, len(addresses), chunk_size):
         batch = addresses[start : start + chunk_size]
         payload = []
@@ -419,20 +558,54 @@ def _fetch_rewards_map(addresses: List[str], limit: int = 1, offset: int = 0, ch
             call_data = fn(limit, offset, addr)._encode_transaction_data()
             payload.append({"jsonrpc": "2.0", "id": call_id, "method": "eth_call", "params": [{"to": contract.address, "data": call_data}, "latest"]})
             id_map[call_id] = addr
+        work_queue.put((payload, id_map, 0))  # 0 = retry count
+        total_chunks += 1
 
-        responses = _rpc_batch(payload)
-        for item in responses:
-            if "result" not in item:
-                continue
-            addr = id_map.get(item["id"])
+    _safe_print(f"  {total_chunks} reward chunks, {len(RPC_URLS)} concurrent workers")
+
+    rewards_lock = Lock()
+    done = [0]
+    max_requeues = len(RPC_URLS) * 2
+
+    def worker(rpc_url: str) -> None:
+        label = _rpc_label(rpc_url)
+        while True:
             try:
-                # Manually decode outputs (web3 <6 lacks decode_function_output).
-                decoded = _web3().codec.decode(output_types, bytes.fromhex(item["result"][2:]))
+                payload, id_map, retries = work_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                responses = _rpc_batch_to(payload, rpc_url)
             except Exception as exc:
-                print(f"Failed decoding rewards for {addr}: {exc}")
+                if retries < max_requeues:
+                    work_queue.put((payload, id_map, retries + 1))
+                else:
+                    _safe_print(f"  [{label}] giving up on chunk after {retries} requeues: {str(exc)[:80]}")
+                    with rewards_lock:
+                        done[0] += 1
                 continue
-            epochs = decoded[0] if decoded else []
-            rewards[addr] = [_normalize_reward_entry(e) for e in epochs]
+            local = {}
+            for item in responses:
+                if "result" not in item:
+                    continue
+                addr = id_map.get(item["id"])
+                try:
+                    decoded = codec.decode(output_types, bytes.fromhex(item["result"][2:]))
+                except Exception as exc:
+                    _safe_print(f"Failed decoding rewards for {addr}: {exc}")
+                    continue
+                epochs = decoded[0] if decoded else []
+                local[addr] = [_normalize_reward_entry(e) for e in epochs]
+            with rewards_lock:
+                rewards.update(local)
+                done[0] += 1
+                if done[0] % 100 == 0 or done[0] == total_chunks:
+                    _safe_print(f"  Rewards: {done[0]}/{total_chunks} chunks")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RPC_URLS)) as executor:
+        futures = [executor.submit(worker, url) for url in RPC_URLS]
+        concurrent.futures.wait(futures)
+
     return rewards
 
 
@@ -498,16 +671,55 @@ def parse_pool(struct, votes_raw: int = 0, reward: dict | None = None, price_map
     )
 
 
+def _fetch_pools_chunk(offset: int, limit: int, rpc_url: str) -> List[dict]:
+    """Fetch a single chunk of pools using a specific RPC URL."""
+    def _do(url):
+        w3 = _web3(url)
+        contract = w3.eth.contract(address=Web3.to_checksum_address(SUGAR), abi=_sugar_abi())
+        return contract.functions.all(limit, offset, 0).call()
+    return _retry_rpc(_do, rpc_url)
+
+
 def iter_pools(batch_size: int = 187, price_map: dict | None = None) -> Iterable[PoolRow]:
     total = get_pool_count()
     voter = _voter()
     print(f"Discovered {total} pools")
 
-    pools = []
+    # Build all fetch tasks
+    tasks = []
     for offset in range(0, total, batch_size):
         limit = min(batch_size, total - offset)
-        print(f"Fetching pools {offset}..{offset+limit-1}")
-        pools.extend(_normalize_pool(struct) for struct in fetch_chunk(limit, offset))
+        tasks.append((offset, limit))
+
+    print(f"Fetching {len(tasks)} pool batches across {len(RPC_URLS)} RPCs concurrently")
+    pool_results: dict[int, list] = {}  # offset -> normalized pool list
+    done = [0]
+
+    def pool_worker(rpc_url: str, my_tasks: list) -> dict:
+        local = {}
+        for offset, limit in my_tasks:
+            raw = _fetch_pools_chunk(offset, limit, rpc_url)
+            local[offset] = [_normalize_pool(s) for s in raw]
+            done[0] += 1
+            if done[0] % 20 == 0 or done[0] == len(tasks):
+                _safe_print(f"  Pools: {done[0]}/{len(tasks)} batches")
+        return local
+
+    # Distribute tasks across RPCs
+    rpc_tasks: dict[str, list] = {url: [] for url in RPC_URLS}
+    for i, task in enumerate(tasks):
+        rpc_url = RPC_URLS[i % len(RPC_URLS)]
+        rpc_tasks[rpc_url].append(task)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RPC_URLS)) as executor:
+        futures = [executor.submit(pool_worker, url, work) for url, work in rpc_tasks.items() if work]
+        for future in concurrent.futures.as_completed(futures):
+            pool_results.update(future.result())
+
+    # Reassemble pools in order
+    pools = []
+    for offset in sorted(pool_results.keys()):
+        pools.extend(pool_results[offset])
 
     # Collect tokens and fetch missing prices
     if price_map is not None:
@@ -695,7 +907,31 @@ def write_csv(rows: Iterable[PoolRow], path: str = "pools.csv") -> None:
         print(f"Tokens missing prices (treated as $0): {tokens}")
 
 
+def _init_rpcs():
+    """Pre-warm Web3 connections for all RPCs and remove dead ones."""
+    global RPC_URLS
+    alive = []
+    def _test(url):
+        try:
+            w3 = _web3(url)
+            w3.eth.block_number  # quick connectivity check
+            return url
+        except Exception as exc:
+            print(f"  RPC dead, removing: {_rpc_label(url)} ({exc})")
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RPC_URLS)) as executor:
+        results = executor.map(_test, RPC_URLS)
+        alive = [url for url in results if url is not None]
+
+    if not alive:
+        raise RuntimeError("All RPCs are dead!")
+    RPC_URLS = alive
+    print(f"Initialized {len(RPC_URLS)} working RPCs")
+
+
 if __name__ == "__main__":
+    _init_rpcs()
     price_map = _load_price_map()
     snapshot_path = _timestamped_csv_path()
     write_csv(iter_pools(price_map=price_map), path=snapshot_path)

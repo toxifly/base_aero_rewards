@@ -33,6 +33,8 @@ jobs:
 
       - name: Fetch pool data and generate HTML
         run: python main.py
+        env:
+          EXTRA_RPC_URLS: ${{ secrets.EXTRA_RPC_URLS }}
 
       - name: Copy pools.html to index.html for GitHub Pages
         run: cp pools.html index.html
